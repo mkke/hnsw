@@ -249,10 +249,21 @@ func (h *Graph[K]) Import(r io.Reader) error {
 				node.neighbors[neighbor] = nil
 			}
 		}
-		// Fill in neighbor pointers
+		// Fill in neighbor pointers. A neighbor key with no matching node in
+		// this layer is a dangling edge -- e.g. one left behind when a node is
+		// deleted without cleaning up an asymmetric referrer (replenish adds
+		// edges in only one direction, so isolate's symmetric unlink can miss
+		// them). Storing the nil from such a missing lookup straight into the
+		// neighbor set means the next graph search/insert dereferences it
+		// (nil.Value -> SIGSEGV). Drop the dangling key instead: an edge to a
+		// node that is not present in the layer is meaningless.
 		for _, node := range nodes {
 			for key := range node.neighbors {
-				node.neighbors[key] = nodes[key]
+				if target := nodes[key]; target != nil {
+					node.neighbors[key] = target
+				} else {
+					delete(node.neighbors, key)
+				}
 			}
 		}
 		h.layers[i] = &layer[K]{nodes: nodes}

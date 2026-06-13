@@ -178,6 +178,54 @@ func TestSavedGraph(t *testing.T) {
 	requireGraphApproxEquals(t, g1.Graph, g2.Graph)
 }
 
+// TestGraph_ImportDropsDanglingNeighbor is a regression test. A serialized
+// graph can hold a neighbor key with no matching node in its layer -- a
+// dangling edge left behind when a node is deleted without unlinking an
+// asymmetric referrer (replenish adds edges one-directionally, so isolate's
+// symmetric unlink misses them). Import used to store the missing lookup's nil
+// straight into the neighbor map, and the next Search dereferenced it
+// (nil.Value -> panic). Import must drop such keys instead.
+func TestGraph_ImportDropsDanglingNeighbor(t *testing.T) {
+	g := newTestGraph[int]()
+	for i := 0; i < 8; i++ {
+		g.Add(Node[int]{i, randFloats(1)})
+	}
+
+	// Inject a dangling neighbor on a base-layer node: key -1 is not a node in
+	// the graph. The map value is irrelevant -- Export serializes neighbor keys
+	// and Import resolves them against the layer's node set.
+	const ghost = -1
+	var victim int
+	for key, node := range g.layers[0].nodes {
+		node.neighbors[ghost] = node
+		victim = key
+		break
+	}
+
+	buf := &bytes.Buffer{}
+	require.NoError(t, g.Export(buf))
+
+	g2 := &Graph[int]{}
+	require.NoError(t, g2.Import(buf))
+
+	// The dangling key must not survive import...
+	_, survived := g2.layers[0].nodes[victim].neighbors[ghost]
+	require.False(t, survived, "dangling neighbor key survived import")
+
+	// ...and no neighbor pointer may be nil anywhere in the imported graph.
+	for _, layer := range g2.layers {
+		for key, node := range layer.nodes {
+			for nKey, n := range node.neighbors {
+				require.NotNil(t, n, "node %v has nil neighbor %v after import", key, nKey)
+			}
+		}
+	}
+
+	// Pre-fix this panicked dereferencing the nil neighbor.
+	_ = g2.Search([]float32{0.5}, 5)
+	verifyGraphNodes(t, g2)
+}
+
 const benchGraphSize = 100
 
 func BenchmarkGraph_Import(b *testing.B) {
